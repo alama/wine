@@ -666,6 +666,7 @@ FONTCONFIGINCL
 CUPSINCL
 AUDIOIOLIBS
 ALSALIBS
+PULSELIBS
 ESDLIBS
 ESDINCL
 ESDCONFIG
@@ -836,6 +837,7 @@ with_openssl
 with_oss
 with_png
 with_pthread
+with_pulse
 with_sane
 with_xcomposite
 with_xcursor
@@ -1526,6 +1528,7 @@ Optional Packages:
   --without-oss           do not use the OSS sound support
   --without-png           do not use PNG
   --without-pthread       do not use the pthread library
+  --without-pulse         do not use PulseAudio sound support
   --without-sane          do not use SANE (scanner support)
   --without-xcomposite    do not use the Xcomposite extension
   --without-xcursor       do not use the Xcursor extension
@@ -2198,6 +2201,12 @@ fi
 # Check whether --with-pthread was given.
 if test "${with_pthread+set}" = set; then
   withval=$with_pthread; if test "x$withval" = "xno"; then ac_cv_header_pthread_h=no; fi
+fi
+
+
+# Check whether --with-pulse was given.
+if test "${with_pulse+set}" = set; then
+  withval=$with_pulse;
 fi
 
 
@@ -15394,6 +15403,43 @@ fi
     CFLAGS="$save_CFLAGS"
 fi
 
+if test "x$with_pulse" != "xno"; then
+    if test "$PKG_CONFIG" != "false"; then
+	{ $as_echo "$as_me:$LINENO: checking for pulseaudio >= 0.9.8" >&5
+$as_echo_n "checking for pulseaudio >= 0.9.8... " >&6; }
+	if "$PKG_CONFIG" --atleast-version=0.9.8 libpulse; then
+	    have_pulseaudio="yes"
+        else
+	    have_pulseaudio="no"
+	fi
+	{ $as_echo "$as_me:$LINENO: result: $have_pulseaudio" >&5
+$as_echo "$have_pulseaudio" >&6; }
+	if test x"$have_pulseaudio" = xyes; then
+	    if "$PKG_CONFIG" --atleast-version=0.9.11 libpulse; then
+
+cat >>confdefs.h <<\_ACEOF
+#define HAVE_PULSEAUDIO_0_9_11 1
+_ACEOF
+
+	    else
+
+cat >>confdefs.h <<\_ACEOF
+#define HAVE_PULSEAUDIO_0_9_11 0
+_ACEOF
+
+	    fi
+	    ac_pulse_libs=`$PKG_CONFIG --libs libpulse`
+
+cat >>confdefs.h <<\_ACEOF
+#define HAVE_PULSEAUDIO 1
+_ACEOF
+
+	    PULSELIBS="$ac_pulse_libs"
+
+	fi
+    fi
+fi
+
 ALSALIBS=""
 
 if test "$ac_cv_header_sys_asoundlib_h" = "yes" -o "$ac_cv_header_alsa_asoundlib_h" = "yes"
@@ -17166,7 +17212,7 @@ _ACEOF
 fi
 
 
-if test "x$ALSALIBS$AUDIOIOLIBS$COREAUDIO$NASLIBS$ESDLIBS$ac_cv_lib_soname_jack" = "x" -a \
+if test "x$ALSALIBS$AUDIOIOLIBS$COREAUDIO$NASLIBS$ESDLIBS$PULSELIBS$ac_cv_lib_soname_jack" = "x" -a \
         "$ac_cv_header_sys_soundcard_h" != "yes" -a \
         "$ac_cv_header_machine_soundcard_h" != "yes" -a \
         "$ac_cv_header_soundcard_h" != "yes" -a \
@@ -27770,6 +27816,14 @@ dlls/wineps.drv/Makefile: dlls/wineps.drv/Makefile.in dlls/Makedll.rules"
 ac_config_files="$ac_config_files dlls/wineps.drv/Makefile"
 
 ALL_MAKEFILES="$ALL_MAKEFILES \\
+	dlls/winepulse.drv/Makefile"
+test "x$enable_winepulse_drv" != xno && ALL_DLL_DIRS="$ALL_DLL_DIRS \\
+	winepulse.drv"
+ALL_MAKEFILE_DEPENDS="$ALL_MAKEFILE_DEPENDS
+dlls/winepulse.drv/Makefile: dlls/winepulse.drv/Makefile.in dlls/Makedll.rules"
+ac_config_files="$ac_config_files dlls/winepulse.drv/Makefile"
+
+ALL_MAKEFILES="$ALL_MAKEFILES \\
 	dlls/winequartz.drv/Makefile"
 test "x$enable_winequartz_drv" != xno && ALL_DLL_DIRS="$ALL_DLL_DIRS \\
 	winequartz.drv"
@@ -29662,6 +29716,7 @@ do
     "dlls/winenas.drv/Makefile") CONFIG_FILES="$CONFIG_FILES dlls/winenas.drv/Makefile" ;;
     "dlls/wineoss.drv/Makefile") CONFIG_FILES="$CONFIG_FILES dlls/wineoss.drv/Makefile" ;;
     "dlls/wineps.drv/Makefile") CONFIG_FILES="$CONFIG_FILES dlls/wineps.drv/Makefile" ;;
+    "dlls/winepulse.drv/Makefile") CONFIG_FILES="$CONFIG_FILES dlls/winepulse.drv/Makefile" ;;
     "dlls/winequartz.drv/Makefile") CONFIG_FILES="$CONFIG_FILES dlls/winequartz.drv/Makefile" ;;
     "dlls/winex11.drv/Makefile") CONFIG_FILES="$CONFIG_FILES dlls/winex11.drv/Makefile" ;;
     "dlls/wing32/Makefile") CONFIG_FILES="$CONFIG_FILES dlls/wing32/Makefile" ;;
