@@ -58,6 +58,7 @@ AC_ARG_WITH(png,       AS_HELP_STRING([--without-png],[do not use PNG]),
             [if test "x$withval" = "xno"; then ac_cv_header_png_h=no; fi])
 AC_ARG_WITH(pthread,   AS_HELP_STRING([--without-pthread],[do not use the pthread library]),
             [if test "x$withval" = "xno"; then ac_cv_header_pthread_h=no; fi])
+AC_ARG_WITH(pulse,     AC_HELP_STRING([--without-pulse],[do not use PulseAudio sound support]))
 AC_ARG_WITH(sane,      AS_HELP_STRING([--without-sane],[do not use SANE (scanner support)]))
 AC_ARG_WITH(xcomposite,AS_HELP_STRING([--without-xcomposite],[do not use the Xcomposite extension]),
             [if test "x$withval" = "xno"; then ac_cv_header_X11_extensions_Xcomposite_h=no; fi])
@@ -1223,6 +1224,29 @@ then
     CFLAGS="$save_CFLAGS"
 fi
 
+dnl **** Check for PulseAudio ****
+if test "x$with_pulse" != "xno"; then
+    if test "$PKG_CONFIG" != "false"; then
+	AC_MSG_CHECKING([for pulseaudio >= 0.9.8])
+	if "$PKG_CONFIG" --atleast-version=0.9.8 libpulse; then
+	    have_pulseaudio="yes"
+        else
+	    have_pulseaudio="no"
+	fi
+	AC_MSG_RESULT([$have_pulseaudio])
+	if test x"$have_pulseaudio" = xyes; then
+	    if "$PKG_CONFIG" --atleast-version=0.9.11 libpulse; then
+	        AC_DEFINE([HAVE_PULSEAUDIO_0_9_11], 1, [define this if pulseaudio is at least version 0.9.11])
+	    else
+		AC_DEFINE([HAVE_PULSEAUDIO_0_9_11], 0, [define this if pulseaudio is at least version 0.9.11])
+	    fi
+	    ac_pulse_libs=`$PKG_CONFIG --libs libpulse`
+	    AC_DEFINE([HAVE_PULSEAUDIO], 1, [define this if you have pulseaudio])
+	    AC_SUBST(PULSELIBS, "$ac_pulse_libs")
+	fi
+    fi
+fi
+
 dnl **** Check for ALSA 1.x ****
 AC_SUBST(ALSALIBS,"")
 if test "$ac_cv_header_sys_asoundlib_h" = "yes" -o "$ac_cv_header_alsa_asoundlib_h" = "yes"
@@ -1349,7 +1373,7 @@ dnl **** Check for libodbc ****
 WINE_CHECK_SONAME(odbc,SQLConnect,,[AC_DEFINE_UNQUOTED(SONAME_LIBODBC,["libodbc.$LIBEXT"])])
 
 dnl **** Check for any sound system ****
-if test "x$ALSALIBS$AUDIOIOLIBS$COREAUDIO$NASLIBS$ESDLIBS$ac_cv_lib_soname_jack" = "x" -a \
+if test "x$ALSALIBS$AUDIOIOLIBS$COREAUDIO$NASLIBS$ESDLIBS$PULSELIBS$ac_cv_lib_soname_jack" = "x" -a \
         "$ac_cv_header_sys_soundcard_h" != "yes" -a \
         "$ac_cv_header_machine_soundcard_h" != "yes" -a \
         "$ac_cv_header_soundcard_h" != "yes" -a \
@@ -2380,6 +2404,7 @@ WINE_CONFIG_MAKEFILE([dlls/winemp3.acm/Makefile],[dlls/Makedll.rules],[dlls],[AL
 WINE_CONFIG_MAKEFILE([dlls/winenas.drv/Makefile],[dlls/Makedll.rules],[dlls],[ALL_DLL_DIRS])
 WINE_CONFIG_MAKEFILE([dlls/wineoss.drv/Makefile],[dlls/Makedll.rules],[dlls],[ALL_DLL_DIRS])
 WINE_CONFIG_MAKEFILE([dlls/wineps.drv/Makefile],[dlls/Makedll.rules],[dlls],[ALL_DLL_DIRS])
+WINE_CONFIG_MAKEFILE([dlls/winepulse.drv/Makefile],[dlls/Makedll.rules],[dlls],[ALL_DLL_DIRS])
 WINE_CONFIG_MAKEFILE([dlls/winequartz.drv/Makefile],[dlls/Makedll.rules],[dlls],[ALL_DLL_DIRS])
 WINE_CONFIG_MAKEFILE([dlls/winex11.drv/Makefile],[dlls/Makedll.rules],[dlls],[ALL_DLL_DIRS])
 WINE_CONFIG_MAKEFILE([dlls/wing32/Makefile],[dlls/Makedll.rules],[dlls],[ALL_DLL_DIRS])

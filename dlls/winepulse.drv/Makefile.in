@@ -1,0 +1,15 @@
+TOPSRCDIR = @top_srcdir@
+TOPOBJDIR = ../..
+SRCDIR    = @srcdir@
+VPATH     = @srcdir@
+MODULE    = winepulse.drv
+IMPORTS   = dxguid uuid winmm user32 advapi32 kernel32
+EXTRALIBS = @PULSELIBS@
+
+C_SRCS = \
+	waveout.c \
+	pulse.c
+
+@MAKE_DLL_RULES@
+
+@DEPENDENCIES@  # everything below this line is overwritten by make depend
