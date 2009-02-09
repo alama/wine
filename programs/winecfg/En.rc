@@ -277,6 +277,7 @@ BEGIN
     IDS_DRIVER_NAS              "NAS Driver"
     IDS_DRIVER_AUDIOIO          "Audio IO (Solaris) Driver"
     IDS_DRIVER_COREAUDIO        "CoreAudio Driver"
+    IDS_DRIVER_PULSE		"PulseAudio Driver"
     IDS_OPEN_DRIVER_ERROR       "Couldn't open %s!"
     IDS_SOUNDDRIVERS            "Sound Drivers"
     IDS_DEVICES_WAVEOUT         "Wave Out Devices"

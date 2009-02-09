@@ -81,6 +81,7 @@ static const char * const builtin_only[] =
     "wineoss.drv",
     "wineps",
     "wineps.drv",
+    "winepulse.drv",
     "winex11.drv",
     "winmm",
     "wintab32",
