@@ -67,7 +67,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(msvcrt);
 #define WX_TEXT           0x80
 
 /* FIXME: this should be allocated dynamically */
-#define MSVCRT_MAX_FILES 2048
+#define MSVCRT_MAX_FILES 20480
 
 typedef struct {
     HANDLE              handle;
