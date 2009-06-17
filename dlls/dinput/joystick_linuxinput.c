@@ -843,6 +843,11 @@ static void joy_polldev(LPDIRECTINPUTDEVICE8A iface)
 	    This->ff_state = ie.value;
 	    break;
 #endif
+#ifdef EV_FF
+	case EV_FF:
+	    /* there is nothing to do */
+	    break;
+#endif
 #ifdef EV_SYN
 	case EV_SYN:
 	    /* there is nothing to do */
