@@ -440,6 +440,7 @@ static POINT WINPOS_GetWinOffset( HWND hwndFrom, HWND hwndTo, BOOL *mirrored )
         if (wndPtr == WND_OTHER_PROCESS) goto other_process;
         if (wndPtr != WND_DESKTOP)
         {
+            //if (hwnd == HWND_TOPMOST) return;
             if (wndPtr->dwExStyle & WS_EX_LAYOUTRTL)
             {
                 mirror_from = TRUE;
