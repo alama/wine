@@ -41,7 +41,14 @@ static void state_blendop(DWORD state, struct wined3d_stateblock *stateblock, st
 
 static void state_undefined(DWORD state, struct wined3d_stateblock *stateblock, struct wined3d_context *context)
 {
-    ERR("Undefined state.\n");
+    static BOOL once = FALSE;
+    if (state)
+        ERR("Undefined state %s\n", debug_d3dstate(state));
+    else if (!once)
+    {
+        ERR("Undefined state.\n");
+        once = TRUE;
+    }
 }
 
 static void state_nop(DWORD state, struct wined3d_stateblock *stateblock, struct wined3d_context *context)
