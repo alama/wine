@@ -60,6 +60,75 @@ static void drawStridedFast(const struct wined3d_gl_info *gl_info, GLenum primit
 }
 
 /*
+ * Emit a vertex using swoftware vertex blending
+ */
+static void emitBlendedVertex(struct wined3d_stateblock *stateBlock,
+                              const float *weights, int nweights, const BYTE *indices,
+                              const float *pos, const float *norm)
+{
+    const float *m;
+    float        vec[4];
+    float        mat[4*4];
+    float        last = 1.f;
+    int          i, j;
+
+    /* compute the weighted sum of the matrices */
+    m = &stateBlock->state.transforms[WINED3D_TS_WORLD_MATRIX((indices ? indices[0] : 0))].u.m[0][0];
+    for (j = 0; j < 16; j++)
+        mat[j] = m[j] * weights[0];
+    last -= weights[0];
+
+    for (i = 1; i < nweights; i++) {
+        if (weights[i]) {
+            m = &stateBlock->state.transforms[WINED3D_TS_WORLD_MATRIX((indices ? indices[i] : i))].u.m[0][0];
+            for (j = 0; j < 16; j++)
+                mat[j] += m[j] * weights[i];
+            last -= weights[i];
+        }
+    }
+
+    /* do the last */
+    if (last) {
+        m = &stateBlock->state.transforms[WINED3D_TS_WORLD_MATRIX((indices ? indices[i] : i))].u.m[0][0];
+        for (j = 0; j < 16; j++)
+            mat[j] += m[j] * last;
+    }
+
+    if (norm) {
+        /* compute the resulting normal */
+        vec[0] = norm[0] * mat[0] + norm[1] * mat[4] + norm[2] * mat[8];
+        vec[1] = norm[0] * mat[1] + norm[1] * mat[5] + norm[2] * mat[9];
+        vec[2] = norm[0] * mat[2] + norm[1] * mat[6] + norm[2] * mat[10];
+        /* normalize */
+        vec[3] = vec[0]*vec[0] + vec[1]*vec[1] + vec[2]*vec[2];
+        if (vec[3]) {
+            vec[3] = 1.f / sqrtf(vec[3]);
+            vec[0] *= vec[3];
+            vec[1] *= vec[3];
+            vec[2] *= vec[3];
+        }
+
+        glNormal3fv(vec);
+    }
+
+    if (pos) {
+        /* compute the resulting position */
+        vec[0] = pos[0] * mat[0] + pos[1] * mat[4] + pos[2] * mat[8] + mat[12];
+        vec[1] = pos[0] * mat[1] + pos[1] * mat[5] + pos[2] * mat[9] + mat[13];
+        vec[2] = pos[0] * mat[2] + pos[1] * mat[6] + pos[2] * mat[10] + mat[14];
+        vec[3] = pos[0] * mat[3] + pos[1] * mat[7] + pos[2] * mat[11] + mat[15];
+        /* normalize */
+        if (vec[3]) {
+            vec[0] /= vec[3];
+            vec[1] /= vec[3];
+            vec[2] /= vec[3];
+        }
+
+        glVertex3fv(vec);
+    }
+}
+
+/*
  * Actually draw using the supplied information.
  * Slower GL version which extracts info about each vertex in turn
  */
@@ -78,7 +147,8 @@ static void drawStridedSlow(const struct wined3d_device *device, const struct wi
     BOOL pixelShader = use_ps(state);
     BOOL specular_fog = FALSE;
     const BYTE *texCoords[WINED3DDP_MAXTEXCOORD];
-    const BYTE *diffuse = NULL, *specular = NULL, *normal = NULL, *position = NULL;
+    const BYTE *diffuse = NULL, *specular = NULL, *normal = NULL, *position = NULL, *weights = NULL, *indices = NULL;
+    int nweights = 0;
     const struct wined3d_gl_info *gl_info = context->gl_info;
     UINT texture_stages = gl_info->limits.texture_stages;
     const struct wined3d_stream_info_element *element;
@@ -169,6 +239,31 @@ static void drawStridedSlow(const struct wined3d_device *device, const struct wi
     else if (gl_info->supported[EXT_SECONDARY_COLOR])
     {
         GL_EXTCALL(glSecondaryColor3fEXT)(0, 0, 0);
+    }
+
+    if (device->vertexBlendSW) {
+        if (!si->elements[WINED3D_FFP_BLENDWEIGHT].data.addr) {
+            WARN("vertex blending enabled but blendWeights.data=NULL\n");
+        } else if (si->elements[WINED3D_FFP_BLENDWEIGHT].format->gl_vtx_type != GL_FLOAT) {
+            FIXME("unsupported blend weights datatype (%d)\n", si->elements[WINED3D_FFP_BLENDWEIGHT].format->id);
+        } else if (position && si->elements[WINED3D_FFP_POSITION].format->emit_idx != WINED3D_FFP_EMIT_FLOAT3) {
+            FIXME("unsupported postion datatype (%d)\n", si->elements[WINED3D_FFP_POSITION].format->id);
+        } else if (normal && si->elements[WINED3D_FFP_NORMAL].format->emit_idx != WINED3D_FFP_EMIT_FLOAT3) {
+            FIXME("unsupported normal datatype (%d)\n", si->elements[WINED3D_FFP_NORMAL].format->id);
+        } else {
+            element = &si->elements[WINED3D_FFP_BLENDWEIGHT];
+            weights = element->data.addr;
+            nweights = element->format->gl_vtx_format;
+        }
+
+        if (si->elements[WINED3D_FFP_BLENDINDICES].data.addr) {
+            if (si->elements[WINED3D_FFP_BLENDINDICES].format->emit_idx != WINED3D_FFP_EMIT_UBYTE4) {
+                FIXME("unsupported blend indices datatype (%d)\n", si->elements[WINED3D_FFP_BLENDINDICES].format->id);
+            } else {
+                element = &si->elements[WINED3D_FFP_BLENDINDICES];
+                indices = element->data.addr;
+            }
+        }
     }
 
     for (textureNo = 0; textureNo < texture_stages; ++textureNo)
@@ -287,17 +382,25 @@ static void drawStridedSlow(const struct wined3d_device *device, const struct wi
             }
         }
 
-        /* Normal -------------------------------- */
+        if (weights) {
+            emitBlendedVertex(device->stateBlock,
+                              (const float*)(weights + SkipnStrides * si->elements[WINED3D_FFP_BLENDWEIGHT].stride), nweights,
+                              indices ? (indices + SkipnStrides * si->elements[WINED3D_FFP_BLENDINDICES].stride) : NULL,
+                              (const float*)(position ? (position + SkipnStrides * si->elements[WINED3D_FFP_POSITION].stride) : NULL),
+                              (const float*)(normal ? (normal + SkipnStrides * si->elements[WINED3D_FFP_NORMAL].stride) : NULL));
+        } else {
+            /* Normal -------------------------------- */
         if (normal)
         {
-            const void *ptrToCoords = normal + SkipnStrides * si->elements[WINED3D_FFP_NORMAL].stride;
+                const void *ptrToCoords = normal + SkipnStrides * si->elements[WINED3D_FFP_NORMAL].stride;
             normal_funcs[si->elements[WINED3D_FFP_NORMAL].format->emit_idx](ptrToCoords);
-        }
+            }
 
-        /* Position -------------------------------- */
-        if (position) {
-            const void *ptrToCoords = position + SkipnStrides * si->elements[WINED3D_FFP_POSITION].stride;
+            /* Position -------------------------------- */
+            if (position) {
+                const void *ptrToCoords = position + SkipnStrides * si->elements[WINED3D_FFP_POSITION].stride;
             position_funcs[si->elements[WINED3D_FFP_POSITION].format->emit_idx](ptrToCoords);
+            }
         }
 
         /* For non indexed mode, step onto next parts */
@@ -713,6 +816,17 @@ void drawPrimitive(struct wined3d_device *device, UINT index_count, UINT StartId
                     warned = TRUE;
                 } else {
                     TRACE("Using software emulation because manual fog coordinates are provided\n");
+                }
+                emulation = TRUE;
+            }
+            else if (device->vertexBlendSW)
+            {
+                static BOOL warned;
+                if (!warned) {
+                    FIXME("Using software emulation because vertex blending is enabled\n");
+                    warned = TRUE;
+                } else {
+                    TRACE("Using software emulation because vertex blending is enabled\n");
                 }
                 emulation = TRUE;
             }
