@@ -3669,7 +3669,7 @@ static void transform_world(struct wined3d_context *context, const struct wined3
         glLoadIdentity();
         checkGLcall("glLoadIdentity()");
     }
-    else
+    else if (!context->swapchain->device->vertexBlendSW)
     {
         /* In the general case, the view matrix is the identity matrix */
         if (context->swapchain->device->view_ident)
@@ -3684,6 +3684,9 @@ static void transform_world(struct wined3d_context *context, const struct wined3
             glMultMatrixf(&state->transforms[WINED3DTS_WORLDMATRIX(0)].u.m[0][0]);
             checkGLcall("glMultMatrixf");
         }
+    } else {
+        glLoadMatrixf(&state->transforms[WINED3DTS_VIEW].u.m[0][0]);
+        checkGLcall("glLoadMatrixf");
     }
 }
 
@@ -3768,10 +3771,30 @@ static void state_vertexblend_w(struct wined3d_context *context, const struct wi
     WINED3DVERTEXBLENDFLAGS f = state->render_states[WINED3DRS_VERTEXBLEND];
     static unsigned int once;
 
-    if (f == WINED3DVBF_DISABLE) return;
-
-    if (!once++) FIXME("Vertex blend flags %#x not supported.\n", f);
-    else WARN("Vertex blend flags %#x not supported.\n", f);
+    switch (f) {
+        case WINED3DVBF_0WEIGHTS:
+        case WINED3DVBF_1WEIGHTS:
+        case WINED3DVBF_2WEIGHTS:
+        case WINED3DVBF_3WEIGHTS:
+            if(!once) {
+                once = TRUE;
+                FIXME("Vertex blending enabled, but not supported by hardware. Using software emulation.\n");
+            }
+            if (!context->swapchain->device->vertexBlendSW) {
+                context->swapchain->device->vertexBlendSW = TRUE;
+                transform_world(context, state, state_id);
+            }
+            break;
+        case WINED3DVBF_TWEENING:
+            WARN("Vertex blend flags %#x not supported.\n", f);
+            /* fall through */
+        default:
+            if (context->swapchain->device->vertexBlendSW) {
+                context->swapchain->device->vertexBlendSW = FALSE;
+                transform_world(context, state, state_id);
+            }
+            break;
+    }
 }
 
 static void state_vertexblend(struct wined3d_context *context, const struct wined3d_state *state, DWORD state_id)
