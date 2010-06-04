@@ -4756,8 +4756,13 @@ HRESULT CDECL wined3d_get_device_caps(const struct wined3d *wined3d, UINT adapte
     caps->MaxUserClipPlanes = gl_info->limits.clipplanes;
     caps->MaxActiveLights = gl_info->limits.lights;
 
-    caps->MaxVertexBlendMatrices = gl_info->limits.blends;
-    caps->MaxVertexBlendMatrixIndex   = 0;
+    if (gl_info->supported[ARB_VERTEX_BLEND]) {
+        caps->MaxVertexBlendMatrices    = gl_info->limits.blends;
+        caps->MaxVertexBlendMatrixIndex = 0;
+    } else {
+        caps->MaxVertexBlendMatrices    = 4;
+        caps->MaxVertexBlendMatrixIndex = 255;
+    }
 
     caps->MaxAnisotropy = gl_info->limits.anisotropy;
     caps->MaxPointSize = gl_info->limits.pointsize_max;
