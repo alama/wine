@@ -107,6 +107,15 @@ static BOOL declaration_element_valid_ffp(const WINED3DVERTEXELEMENT *element)
                     return FALSE;
             }
 
+        case WINED3DDECLUSAGE_BLENDINDICES:
+            switch(element->format)
+            {
+                case WINED3DFMT_R8G8B8A8_UINT:
+                    return TRUE;
+                default:
+                    return FALSE;
+            }
+
         case WINED3DDECLUSAGE_NORMAL:
             switch(element->format)
             {
