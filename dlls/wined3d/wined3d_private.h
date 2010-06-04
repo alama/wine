@@ -1708,6 +1708,7 @@ struct wined3d_device
 
     WORD view_ident : 1;                /* true iff view matrix is identity */
     WORD vertexBlendUsed : 1;           /* To avoid needless setting of the blend matrices */
+    WORD vertexBlendSW : 1;             /* vertexBlend software fallback used */
     WORD isRecordingState : 1;
     WORD isInDraw : 1;
     WORD bCursorVisible : 1;
