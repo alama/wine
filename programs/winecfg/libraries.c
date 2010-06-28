@@ -73,6 +73,7 @@ static const char * const builtin_only[] =
     "winedos",
     "winemp3.acm",
     "wineps",
+    "winepulse.drv",
     "winmm",
     "wintab32",
     "wnaspi32",
