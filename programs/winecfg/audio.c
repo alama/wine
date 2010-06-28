@@ -90,6 +90,7 @@ typedef struct
 } AUDIO_DRIVER;
 
 static AUDIO_DRIVER sAudioDrivers[] = {
+  {IDS_DRIVER_PULSE,     "pulse"},
   {IDS_DRIVER_ALSA,      "alsa"},
   {IDS_DRIVER_OSS,       "oss"},
   {IDS_DRIVER_COREAUDIO, "coreaudio"},
