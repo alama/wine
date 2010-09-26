@@ -1485,20 +1485,23 @@ fi
 dnl **** Check for PulseAudio ****
 AC_SUBST(PULSELIBS,"")
 AC_SUBST(PULSEINCL,"")
+AC_SUBST(PULSECFLAGS,"")
 if test "x$with_pulse" != "xno";
 then
     ac_save_CPPFLAGS="$CPPFLAGS"
     if test "$PKG_CONFIG" != "false";
     then
         ac_pulse_libs="`$PKG_CONFIG --libs libpulse 2>/dev/null`"
-        ac_pulse_cflags="`$PKG_CONFIG --cflags-only-I libpulse 2>/dev/null`"
+        ac_pulse_cflags="`$PKG_CONFIG --cflags libpulse 2>/dev/null`"
+        ac_pulse_incl="`$PKG_CONFIG --cflags-only-I libpulse 2>/dev/null`"
 
         CPPFLAGS="$CPPFLAGS $ac_pulse_cflags"
         AC_CHECK_HEADERS(pulse/pulseaudio.h,
             [AC_CHECK_LIB(pulse, pa_stream_is_corked,
                 [AC_DEFINE(HAVE_PULSEAUDIO, 1, [Define if you have pulseaudio])
                  PULSELIBS="$ac_pulse_libs"
-                 PULSEINCL="$ac_pulse_cflags"],,$ac_pulse_libs)
+                 PULSECFLAGS="$ac_pulse_cflags"
+                 PULSEINCL="$ac_pulse_incl"],,$ac_pulse_libs)
         ])
     fi
     CPPFLAGS="$ac_save_CPPFLAGS"
