@@ -2,6 +2,7 @@ MODULE    = winepulse.drv
 IMPORTS   = winmm user32 kernel32
 EXTRALIBS = @PULSELIBS@
 EXTRAINCL = @PULSEINCL@
+MODCFLAGS = @PULSECFLAGS@
 
 C_SRCS = waveout.c \
          wavein.c \
