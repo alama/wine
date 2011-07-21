@@ -1292,6 +1292,7 @@ BOOL WINAPI WinHttpGetDefaultProxyConfiguration( WINHTTP_PROXY_INFO *info )
  */
 BOOL WINAPI WinHttpGetIEProxyConfigForCurrentUser( WINHTTP_CURRENT_USER_IE_PROXY_CONFIG *config )
 {
+    static BOOL once = FALSE;
     TRACE("%p\n", config);
 
     if (!config)
@@ -1302,7 +1303,11 @@ BOOL WINAPI WinHttpGetIEProxyConfigForCurrentUser( WINHTTP_CURRENT_USER_IE_PROXY
 
     /* FIXME: read from HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings */
 
-    FIXME("returning no proxy used\n");
+    if (!once)
+    {
+        FIXME("returning no proxy used\n");
+        once = TRUE;
+    }
     config->fAutoDetect       = FALSE;
     config->lpszAutoConfigUrl = NULL;
     config->lpszProxy         = NULL;
