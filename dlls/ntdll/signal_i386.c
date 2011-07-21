@@ -1489,7 +1489,7 @@ static inline DWORD is_privileged_instr( CONTEXT *context )
     case 0x6d: /* insl (%dx) */
     case 0x6e: /* outsb (%dx) */
     case 0x6f: /* outsl (%dx) */
-    case 0xcd: /* int $xx */
+    /*case 0xcd:  int $xx, creates an EXCEPTION_ACCESS_VIOLATION */
     case 0xe4: /* inb al,XX */
     case 0xe5: /* in (e)ax,XX */
     case 0xe6: /* outb XX,al */
@@ -1699,6 +1699,51 @@ static inline DWORD get_fpu_code( const CONTEXT *context )
     return EXCEPTION_FLT_INVALID_OPERATION;  /* generic error */
 }
 
+static BOOL handle_windows_syscall( EXCEPTION_RECORD *rec, CONTEXT *context )
+{
+    BYTE *instr = (BYTE *)context->Eip;
+    const DWORD syscall = context->Eax;
+    PVOID data = (PVOID) context->Edx;
+    DWORD res;
+
+    TRACE( "handling syscall at 0x%p, eax: 0x%x, edx: 0x%p\n",
+          instr, syscall, data );
+
+    __TRY
+    {
+        if (instr[0] != 0xcd || instr[1] != 0x2e) {
+            WINE_ERR("got a syscall request but didn't find an 'int 2eh' instruction at %p\n", instr);
+            return FALSE;
+        }
+    }
+    __EXCEPT_PAGE_FAULT
+    {
+        return FALSE;
+    }
+    __ENDTRY
+
+    __TRY
+    {
+        switch (syscall)
+        {
+          default:
+            FIXME("Windows syscal #%u called, data: %p\n", syscall, data);
+            res = STATUS_ACCESS_VIOLATION;
+            break;
+        }
+
+    }
+    __EXCEPT_ALL
+    {
+        res = GetExceptionCode();
+    }
+    __ENDTRY
+
+    context->Eax = res;
+    context->Eip += 2;
+
+    return TRUE;
+}
 
 /**********************************************************************
  *		raise_segv_exception
@@ -1736,6 +1781,12 @@ static void WINAPI raise_segv_exception( EXCEPTION_RECORD *rec, CONTEXT *context
             context->EFlags &= ~0x00040000;
             goto done;
         }
+        break;
+    case STATUS_WAKE_SYSTEM:
+        if (handle_windows_syscall( rec, context ))
+            goto done;
+        /* doesn't appear to be a syscall, turn it into an access violation */
+        rec->ExceptionCode = EXCEPTION_ACCESS_VIOLATION;
         break;
     }
     status = NtRaiseException( rec, context, TRUE );
@@ -1880,8 +1931,12 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
     case TRAP_x86_STKFLT:  /* Stack fault */
         rec->ExceptionCode = EXCEPTION_STACK_OVERFLOW;
         break;
-    case TRAP_x86_SEGNPFLT:  /* Segment not present exception */
     case TRAP_x86_PROTFLT:   /* General protection fault */
+        if (get_error_code(context) == 0x172) {
+            rec->ExceptionCode = STATUS_WAKE_SYSTEM ;
+            break;
+        } /* fallthrough */
+    case TRAP_x86_SEGNPFLT:  /* Segment not present exception */
     case TRAP_x86_UNKNOWN:   /* Unknown fault code */
         {
             WORD err = get_error_code(context);
