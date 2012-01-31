@@ -73,7 +73,7 @@ static void resource_check_usage(DWORD usage)
             | WINED3DUSAGE_OVERLAY;
 
     if (usage & ~handled)
-        FIXME("Unhandled usage flags %#x.\n", usage & ~handled);
+        FIXME("Unhandled usage flags %s.\n", debug_d3dusage(usage & ~handled));
 }
 
 HRESULT resource_init(struct wined3d_resource *resource, struct wined3d_device *device,
