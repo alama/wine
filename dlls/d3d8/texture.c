@@ -293,6 +293,17 @@ static HRESULT WINAPI IDirect3DTexture8Impl_GetSurfaceLevel(IDirect3DTexture8 *i
     }
 
     *surface = wined3d_resource_get_parent(sub_resource);
+    if (IsBadReadPtr(*surface, sizeof( IDirect3DSurface8))
+     || IsBadReadPtr((*surface)->lpVtbl, sizeof(LPVOID))
+     || IsBadReadPtr((*surface)->lpVtbl->QueryInterface, sizeof(LPVOID)+5)
+     || IsBadCodePtr((FARPROC)(*surface)->lpVtbl->QueryInterface)
+     )
+    {
+        *surface = NULL;
+        wined3d_mutex_unlock();
+        return D3DERR_INVALIDCALL;
+    }
+
     IDirect3DSurface8_AddRef(*surface);
     wined3d_mutex_unlock();
 
