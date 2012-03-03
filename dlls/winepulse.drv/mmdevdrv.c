@@ -71,9 +71,8 @@ static pthread_cond_t pulse_cond = PTHREAD_COND_INITIALIZER;
 static struct list g_sessions = LIST_INIT(g_sessions);
 
 /* Mixer format + period times */
-static pa_sample_spec pulse_mix_ss;
-static pa_channel_map pulse_mix_map;
-static REFERENCE_TIME pulse_min_period, pulse_def_period;
+static WAVEFORMATEXTENSIBLE pulse_fmt[2];
+static REFERENCE_TIME pulse_min_period[2], pulse_def_period[2];
 
 static DWORD pulse_stream_volume;
 
@@ -134,8 +133,8 @@ typedef struct _AudioSessionWrapper {
 typedef struct _ACPacket {
     struct list entry;
     UINT64 qpcpos;
-    UINT filled, discont;
     BYTE *data;
+    UINT32 discont;
 } ACPacket;
 
 struct ACImpl {
@@ -155,7 +154,7 @@ struct ACImpl {
     AUDCLNT_SHAREMODE share;
     HANDLE event;
 
-    UINT32 bufsize_frames, bufsize_bytes, locked, capture_period, pad, started;
+    UINT32 bufsize_frames, bufsize_bytes, locked, capture_period, pad, started, peek_ofs;
     void *locked_ptr, *tmp_buffer;
 
     pa_stream *stream;
@@ -269,12 +268,34 @@ static DWORD CALLBACK pulse_mainloop_thread(void *tmp) {
 static void pulse_contextcallback(pa_context *c, void *userdata);
 static void pulse_stream_state(pa_stream *s, void *user);
 
-static void pulse_probe_settings(void) {
+static const enum pa_channel_position pulse_pos_from_wfx[] = {
+    PA_CHANNEL_POSITION_FRONT_LEFT,
+    PA_CHANNEL_POSITION_FRONT_RIGHT,
+    PA_CHANNEL_POSITION_FRONT_CENTER,
+    PA_CHANNEL_POSITION_LFE,
+    PA_CHANNEL_POSITION_REAR_LEFT,
+    PA_CHANNEL_POSITION_REAR_RIGHT,
+    PA_CHANNEL_POSITION_FRONT_LEFT_OF_CENTER,
+    PA_CHANNEL_POSITION_FRONT_RIGHT_OF_CENTER,
+    PA_CHANNEL_POSITION_REAR_CENTER,
+    PA_CHANNEL_POSITION_SIDE_LEFT,
+    PA_CHANNEL_POSITION_SIDE_RIGHT,
+    PA_CHANNEL_POSITION_TOP_CENTER,
+    PA_CHANNEL_POSITION_TOP_FRONT_LEFT,
+    PA_CHANNEL_POSITION_TOP_FRONT_CENTER,
+    PA_CHANNEL_POSITION_TOP_FRONT_RIGHT,
+    PA_CHANNEL_POSITION_TOP_REAR_LEFT,
+    PA_CHANNEL_POSITION_TOP_REAR_CENTER,
+    PA_CHANNEL_POSITION_TOP_REAR_RIGHT
+};
+
+static void pulse_probe_settings(int render, WAVEFORMATEXTENSIBLE *fmt) {
+    WAVEFORMATEX *wfx = &fmt->Format;
     pa_stream *stream;
     pa_channel_map map;
     pa_sample_spec ss;
     pa_buffer_attr attr;
-    int ret;
+    int ret, i;
     unsigned int length = 0;
 
     pa_channel_map_init_auto(&map, 2, PA_CHANNEL_MAP_ALSA);
@@ -292,16 +313,21 @@ static void pulse_probe_settings(void) {
         pa_stream_set_state_callback(stream, pulse_stream_state, NULL);
     if (!stream)
         ret = -1;
-    else
+    else if (render)
         ret = pa_stream_connect_playback(stream, NULL, &attr,
-        PA_STREAM_START_CORKED|PA_STREAM_FIX_RATE|PA_STREAM_FIX_FORMAT|PA_STREAM_FIX_CHANNELS|PA_STREAM_EARLY_REQUESTS, NULL, NULL);
+        PA_STREAM_START_CORKED|PA_STREAM_FIX_RATE|PA_STREAM_FIX_CHANNELS|PA_STREAM_EARLY_REQUESTS, NULL, NULL);
+    else
+        ret = pa_stream_connect_record(stream, NULL, &attr, PA_STREAM_START_CORKED|PA_STREAM_FIX_RATE|PA_STREAM_FIX_CHANNELS|PA_STREAM_EARLY_REQUESTS);
     if (ret >= 0) {
         while (pa_stream_get_state(stream) == PA_STREAM_CREATING)
             pthread_cond_wait(&pulse_cond, &pulse_lock);
         if (pa_stream_get_state(stream) == PA_STREAM_READY) {
             ss = *pa_stream_get_sample_spec(stream);
             map = *pa_stream_get_channel_map(stream);
-            length = pa_stream_get_buffer_attr(stream)->minreq;
+            if (render)
+                length = pa_stream_get_buffer_attr(stream)->minreq;
+            else
+                length = pa_stream_get_buffer_attr(stream)->fragsize;
             pa_stream_disconnect(stream);
             while (pa_stream_get_state(stream) == PA_STREAM_READY)
                 pthread_cond_wait(&pulse_cond, &pulse_lock);
@@ -309,14 +335,51 @@ static void pulse_probe_settings(void) {
     }
     if (stream)
         pa_stream_unref(stream);
-    pulse_mix_ss = ss;
-    pulse_mix_map = map;
     if (length)
-        pulse_def_period = pulse_min_period = pa_bytes_to_usec(10 * length, &pulse_mix_ss);
+        pulse_def_period[!render] = pulse_min_period[!render] = pa_bytes_to_usec(10 * length, &ss);
     else
-        pulse_min_period = MinimumPeriod;
-    if (pulse_def_period <= DefaultPeriod)
-        pulse_def_period = DefaultPeriod;
+        pulse_min_period[!render] = MinimumPeriod;
+    if (pulse_def_period[!render] <= DefaultPeriod)
+        pulse_def_period[!render] = DefaultPeriod;
+
+    wfx->wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+    wfx->cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
+    wfx->nChannels = ss.channels;
+    wfx->wBitsPerSample = 8 * pa_sample_size_of_format(ss.format);
+    wfx->nSamplesPerSec = ss.rate;
+    wfx->nBlockAlign = pa_frame_size(&ss);
+    wfx->nAvgBytesPerSec = wfx->nSamplesPerSec * wfx->nBlockAlign;
+    if (ss.format != PA_SAMPLE_S24_32LE)
+        fmt->Samples.wValidBitsPerSample = wfx->wBitsPerSample;
+    else
+        fmt->Samples.wValidBitsPerSample = 24;
+    if (ss.format == PA_SAMPLE_FLOAT32LE)
+        fmt->SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+    else
+        fmt->SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
+
+    fmt->dwChannelMask = 0;
+    for (i = 0; i < map.channels; ++i)
+        switch (map.map[i]) {
+            default: FIXME("Unhandled channel %s\n", pa_channel_position_to_string(map.map[i])); break;
+            case PA_CHANNEL_POSITION_FRONT_LEFT: fmt->dwChannelMask |= SPEAKER_FRONT_LEFT; break;
+            case PA_CHANNEL_POSITION_MONO:
+            case PA_CHANNEL_POSITION_FRONT_CENTER: fmt->dwChannelMask |= SPEAKER_FRONT_CENTER; break;
+            case PA_CHANNEL_POSITION_FRONT_RIGHT: fmt->dwChannelMask |= SPEAKER_FRONT_RIGHT; break;
+            case PA_CHANNEL_POSITION_REAR_LEFT: fmt->dwChannelMask |= SPEAKER_BACK_LEFT; break;
+            case PA_CHANNEL_POSITION_REAR_CENTER: fmt->dwChannelMask |= SPEAKER_BACK_CENTER; break;
+            case PA_CHANNEL_POSITION_REAR_RIGHT: fmt->dwChannelMask |= SPEAKER_BACK_RIGHT; break;
+            case PA_CHANNEL_POSITION_LFE: fmt->dwChannelMask |= SPEAKER_LOW_FREQUENCY; break;
+            case PA_CHANNEL_POSITION_SIDE_LEFT: fmt->dwChannelMask |= SPEAKER_SIDE_LEFT; break;
+            case PA_CHANNEL_POSITION_SIDE_RIGHT: fmt->dwChannelMask |= SPEAKER_SIDE_RIGHT; break;
+            case PA_CHANNEL_POSITION_TOP_CENTER: fmt->dwChannelMask |= SPEAKER_TOP_CENTER; break;
+            case PA_CHANNEL_POSITION_TOP_FRONT_LEFT: fmt->dwChannelMask |= SPEAKER_TOP_FRONT_LEFT; break;
+            case PA_CHANNEL_POSITION_TOP_FRONT_CENTER: fmt->dwChannelMask |= SPEAKER_TOP_FRONT_CENTER; break;
+            case PA_CHANNEL_POSITION_TOP_FRONT_RIGHT: fmt->dwChannelMask |= SPEAKER_TOP_FRONT_RIGHT; break;
+            case PA_CHANNEL_POSITION_TOP_REAR_LEFT: fmt->dwChannelMask |= SPEAKER_TOP_BACK_LEFT; break;
+            case PA_CHANNEL_POSITION_TOP_REAR_CENTER: fmt->dwChannelMask |= SPEAKER_TOP_BACK_CENTER; break;
+            case PA_CHANNEL_POSITION_TOP_REAR_RIGHT: fmt->dwChannelMask |= SPEAKER_TOP_BACK_RIGHT; break;
+        }
 }
 
 static HRESULT pulse_connect(void)
@@ -378,7 +441,8 @@ static HRESULT pulse_connect(void)
     TRACE("Connected to server %s with protocol version: %i.\n",
         pa_context_get_server(pulse_ctx),
         pa_context_get_server_protocol_version(pulse_ctx));
-    pulse_probe_settings();
+    pulse_probe_settings(1, &pulse_fmt[0]);
+    pulse_probe_settings(0, &pulse_fmt[1]);
     return S_OK;
 
 fail:
@@ -457,16 +521,16 @@ static void pulse_wr_callback(pa_stream *s, size_t bytes, void *userdata)
 
     assert(oldpad >= This->pad);
 
-    if (This->event)
-        SetEvent(This->event);
-
-    if (This->pad && pa_stream_get_time(This->stream, &time) >= 0)
+    if (0 && This->pad && pa_stream_get_time(This->stream, &time) >= 0)
         This->clock_pulse = time;
     else
         This->clock_pulse = PA_USEC_INVALID;
 
     This->clock_written += oldpad - This->pad;
     TRACE("New pad: %u (-%u)\n", This->pad / pa_frame_size(&This->ss), (oldpad - This->pad) / pa_frame_size(&This->ss));
+
+    if (This->event)
+        SetEvent(This->event);
 }
 
 static void pulse_underflow_callback(pa_stream *s, void *userdata)
@@ -495,63 +559,108 @@ static void pulse_started_callback(pa_stream *s, void *userdata)
 
     TRACE("(Re)started playing\n");
     assert(This->clock_pulse == PA_USEC_INVALID);
-    if (pa_stream_get_time(This->stream, &time) >= 0)
+    if (0 && pa_stream_get_time(This->stream, &time) >= 0)
         This->clock_pulse = time;
     if (This->event)
         SetEvent(This->event);
 }
 
+static void pulse_rd_loop(ACImpl *This, size_t bytes)
+{
+    while (bytes >= This->capture_period) {
+        ACPacket *p, *next;
+        LARGE_INTEGER stamp, freq;
+        BYTE *dst, *src;
+        UINT32 src_len, copy, rem = This->capture_period;
+        if (!(p = (ACPacket*)list_head(&This->packet_free_head))) {
+            p = (ACPacket*)list_head(&This->packet_filled_head);
+
+            next = (ACPacket*)p->entry.next;
+            next->discont = 1;
+            assert(This->pad == This->bufsize_bytes);
+        } else {
+            assert(This->pad < This->bufsize_bytes);
+            This->pad += This->capture_period;
+            assert(This->pad <= This->bufsize_bytes);
+        }
+        QueryPerformanceCounter(&stamp);
+        QueryPerformanceFrequency(&freq);
+        p->qpcpos = (stamp.QuadPart * (INT64)10000000) / freq.QuadPart;
+        p->discont = 0;
+        list_remove(&p->entry);
+        list_add_tail(&This->packet_filled_head, &p->entry);
+
+        dst = p->data;
+        while (rem) {
+            pa_stream_peek(This->stream, (const void**)&src, &src_len);
+            assert(src_len && src_len <= bytes);
+            assert(This->peek_ofs < src_len);
+            src += This->peek_ofs;
+            src_len -= This->peek_ofs;
+
+            copy = rem;
+            if (copy > src_len)
+                copy = src_len;
+            memcpy(dst, src, rem);
+            src += copy;
+            src_len -= copy;
+            dst += copy;
+            rem -= copy;
+
+            if (!src_len) {
+                This->peek_ofs = 0;
+                pa_stream_drop(This->stream);
+            } else
+                This->peek_ofs += copy;
+        }
+        bytes -= This->capture_period;
+    }
+}
+
+static void pulse_rd_drop(ACImpl *This, size_t bytes)
+{
+    while (bytes >= This->capture_period) {
+        UINT32 src_len, copy, rem = This->capture_period;
+        while (rem) {
+            const void *src;
+            pa_stream_peek(This->stream, &src, &src_len);
+            assert(src_len && src_len <= bytes);
+            assert(This->peek_ofs < src_len);
+            src_len -= This->peek_ofs;
+
+            copy = rem;
+            if (copy > src_len)
+                copy = src_len;
+
+            src_len -= copy;
+            rem -= copy;
+
+            if (!src_len) {
+                This->peek_ofs = 0;
+                pa_stream_drop(This->stream);
+            } else
+                This->peek_ofs += copy;
+            bytes -= copy;
+        }
+    }
+}
+
 static void pulse_rd_callback(pa_stream *s, size_t bytes, void *userdata)
 {
     ACImpl *This = userdata;
-    int filled_one = 0;
 
     TRACE("Readable total: %u, fragsize: %u\n", bytes, pa_stream_get_buffer_attr(s)->fragsize);
-    do {
-        const char *ptr;
-        UINT32 len = 0;
-        pa_stream_peek(This->stream, (const void**)&ptr, &len);
-        assert(len && len <= bytes);
-        bytes -= len;
-        while (len) {
-            ACPacket *p, *next;
-            UINT32 rem;
-            if (!list_empty(&This->packet_free_head))
-                p = (ACPacket*)list_head(&This->packet_free_head);
-            else {
-                p = (ACPacket*)list_head(&This->packet_filled_head);
-                list_remove(&p->entry);
-                list_add_head(&This->packet_free_head, &p->entry);
-                p->filled = 0;
+    assert(bytes >= This->peek_ofs);
+    bytes -= This->peek_ofs;
+    if (bytes < This->capture_period)
+        return;
 
-                next = (ACPacket*)list_head(&This->packet_filled_head);
-                next->discont = 1;
-            }
-            rem = This->capture_period - p->filled;
-            if (rem > len)
-                rem = len;
-            memcpy(p->data + p->filled, ptr, rem);
-            ptr += rem;
-            len -= rem;
-            p->filled += rem;
-            if (p->filled == This->capture_period) {
-                LARGE_INTEGER stamp, freq;
-                QueryPerformanceCounter(&stamp);
-                QueryPerformanceFrequency(&freq);
-                p->qpcpos = (stamp.QuadPart * (INT64)10000000) / freq.QuadPart;
-                p->discont = 0;
-                list_remove(&p->entry);
-                list_add_tail(&This->packet_filled_head, &p->entry);
-                filled_one = 1;
-                This->pad += p->filled;
-                if (This->pad > This->bufsize_bytes)
-                    This->pad = This->bufsize_bytes;
-            }
-        }
-        pa_stream_drop(This->stream);
-    } while (bytes);
+    if (This->started)
+        pulse_rd_loop(This, bytes);
+    else
+        pulse_rd_drop(This, bytes);
 
-    if (filled_one && This->event)
+    if (This->event)
         SetEvent(This->event);
 }
 
@@ -788,7 +897,7 @@ static WAVEFORMATEX *clone_format(const WAVEFORMATEX *fmt)
     else
         size = sizeof(WAVEFORMATEX);
 
-    ret = HeapAlloc(GetProcessHeap(), 0, size);
+    ret = CoTaskMemAlloc(size);
     if (!ret)
         return NULL;
 
@@ -913,26 +1022,99 @@ static HRESULT get_audio_session(const GUID *sessionguid,
     return S_OK;
 }
 
-static enum pa_channel_position pulse_map[] = {
-    PA_CHANNEL_POSITION_FRONT_LEFT,
-    PA_CHANNEL_POSITION_FRONT_RIGHT,
-    PA_CHANNEL_POSITION_FRONT_CENTER,
-    PA_CHANNEL_POSITION_LFE,
-    PA_CHANNEL_POSITION_REAR_LEFT,
-    PA_CHANNEL_POSITION_REAR_RIGHT,
-    PA_CHANNEL_POSITION_FRONT_LEFT_OF_CENTER,
-    PA_CHANNEL_POSITION_FRONT_RIGHT_OF_CENTER,
-    PA_CHANNEL_POSITION_REAR_CENTER,
-    PA_CHANNEL_POSITION_SIDE_LEFT,
-    PA_CHANNEL_POSITION_SIDE_RIGHT,
-    PA_CHANNEL_POSITION_TOP_CENTER,
-    PA_CHANNEL_POSITION_TOP_FRONT_LEFT,
-    PA_CHANNEL_POSITION_TOP_FRONT_CENTER,
-    PA_CHANNEL_POSITION_TOP_FRONT_RIGHT,
-    PA_CHANNEL_POSITION_TOP_REAR_LEFT,
-    PA_CHANNEL_POSITION_TOP_REAR_CENTER,
-    PA_CHANNEL_POSITION_TOP_REAR_RIGHT
-};
+static HRESULT pulse_spec_from_waveformat(ACImpl *This, const WAVEFORMATEX *fmt)
+{
+    pa_channel_map_init(&This->map);
+    This->ss.rate = fmt->nSamplesPerSec;
+    This->ss.format = PA_SAMPLE_INVALID;
+    switch(fmt->wFormatTag) {
+    case WAVE_FORMAT_IEEE_FLOAT:
+        if (!fmt->nChannels || fmt->nChannels > 2 || fmt->wBitsPerSample != 32)
+            break;
+        This->ss.format = PA_SAMPLE_FLOAT32LE;
+        pa_channel_map_init_auto(&This->map, fmt->nChannels, PA_CHANNEL_MAP_ALSA);
+        break;
+    case WAVE_FORMAT_PCM:
+        if (!fmt->nChannels || fmt->nChannels > 2)
+            break;
+        if (fmt->wBitsPerSample == 8)
+            This->ss.format = PA_SAMPLE_U8;
+        else if (fmt->wBitsPerSample == 16)
+            This->ss.format = PA_SAMPLE_S16LE;
+        pa_channel_map_init_auto(&This->map, fmt->nChannels, PA_CHANNEL_MAP_ALSA);
+        break;
+    case WAVE_FORMAT_EXTENSIBLE: {
+        WAVEFORMATEXTENSIBLE *wfe = (WAVEFORMATEXTENSIBLE*)fmt;
+        DWORD mask = wfe->dwChannelMask;
+        DWORD i = 0, j;
+        if (fmt->cbSize != (sizeof(*wfe) - sizeof(*fmt)) && fmt->cbSize != sizeof(*wfe))
+            break;
+        if (IsEqualGUID(&wfe->SubFormat, &KSDATAFORMAT_SUBTYPE_IEEE_FLOAT) &&
+            (!wfe->Samples.wValidBitsPerSample || wfe->Samples.wValidBitsPerSample == 32) &&
+            fmt->wBitsPerSample == 32)
+            This->ss.format = PA_SAMPLE_FLOAT32LE;
+        else if (IsEqualGUID(&wfe->SubFormat, &KSDATAFORMAT_SUBTYPE_PCM)) {
+            DWORD valid = wfe->Samples.wValidBitsPerSample;
+            if (!valid)
+                valid = fmt->wBitsPerSample;
+            if (!valid || valid > fmt->wBitsPerSample)
+                break;
+            switch (fmt->wBitsPerSample) {
+                case 8:
+                    if (valid == 8)
+                        This->ss.format = PA_SAMPLE_U8;
+                    break;
+                case 16:
+                    if (valid == 16)
+                        This->ss.format = PA_SAMPLE_S16LE;
+                    break;
+                case 24:
+                    if (valid == 24)
+                        This->ss.format = PA_SAMPLE_S24LE;
+                    break;
+                case 32:
+                    if (valid == 24)
+                        This->ss.format = PA_SAMPLE_S24_32LE;
+                    else if (valid == 32)
+                        This->ss.format = PA_SAMPLE_S32LE;
+                default:
+                    break;
+            }
+        }
+        This->map.channels = fmt->nChannels;
+        if (!mask)
+            mask = get_channel_mask(fmt->nChannels);
+        for (j = 0; j < sizeof(pulse_pos_from_wfx)/sizeof(*pulse_pos_from_wfx) && i < fmt->nChannels; ++j) {
+            if (mask & (1 << j))
+                This->map.map[i++] = pulse_pos_from_wfx[j];
+        }
+
+        /* Special case for mono since pulse appears to map it differently */
+        if (mask == SPEAKER_FRONT_CENTER)
+            This->map.map[0] = PA_CHANNEL_POSITION_MONO;
+
+        if ((mask & SPEAKER_ALL) && i < fmt->nChannels) {
+            This->map.map[i++] = PA_CHANNEL_POSITION_MONO;
+            FIXME("Is the 'all' channel mapped correctly?\n");
+        }
+
+        if (i < fmt->nChannels || (mask & SPEAKER_RESERVED)) {
+            This->map.channels = 0;
+            ERR("Invalid channel mask: %i/%i and %x\n", i, fmt->nChannels, mask);
+            break;
+        }
+        break;
+        }
+        default: FIXME("Unhandled tag %x\n", fmt->wFormatTag);
+    }
+    This->ss.channels = This->map.channels;
+    if (!pa_channel_map_valid(&This->map) || This->ss.format == PA_SAMPLE_INVALID) {
+        ERR("Invalid format! Channel spec valid: %i, format: %i\n", pa_channel_map_valid(&This->map), This->ss.format);
+        dump_fmt(fmt);
+        return AUDCLNT_E_UNSUPPORTED_FORMAT;
+    }
+    return S_OK;
+}
 
 static HRESULT WINAPI AudioClient_Initialize(IAudioClient *iface,
         AUDCLNT_SHAREMODE mode, DWORD flags, REFERENCE_TIME duration,
@@ -971,104 +1153,19 @@ static HRESULT WINAPI AudioClient_Initialize(IAudioClient *iface,
         pthread_mutex_unlock(&pulse_lock);
         return AUDCLNT_E_ALREADY_INITIALIZED;
     }
-    pa_channel_map_init(&This->map);
-    This->ss.rate = fmt->nSamplesPerSec;
-    This->ss.format = PA_SAMPLE_INVALID;
-    switch(fmt->wFormatTag) {
-    case WAVE_FORMAT_PCM:
-    case WAVE_FORMAT_IEEE_FLOAT:
-        if (!fmt->nChannels || fmt->nChannels > 2)
-            break;
-        if (fmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT)
-            This->ss.format = PA_SAMPLE_FLOAT32LE;
-        else if (fmt->wBitsPerSample == 8)
-            This->ss.format = PA_SAMPLE_U8;
-        else if (fmt->wBitsPerSample == 16)
-            This->ss.format = PA_SAMPLE_S16LE;
-        pa_channel_map_init_auto(&This->map, fmt->nChannels, PA_CHANNEL_MAP_ALSA);
-        break;
-    case WAVE_FORMAT_EXTENSIBLE: {
-        WAVEFORMATEXTENSIBLE *wfe = (WAVEFORMATEXTENSIBLE*)fmt;
-        DWORD mask = wfe->dwChannelMask;
-        DWORD i = 0, j;
-        if (fmt->cbSize != (sizeof(*wfe) - sizeof(*fmt)) && fmt->cbSize != sizeof(*wfe))
-            break;
-        if (IsEqualGUID(&wfe->SubFormat, &KSDATAFORMAT_SUBTYPE_IEEE_FLOAT))
-            This->ss.format = PA_SAMPLE_FLOAT32LE;
-        else if (IsEqualGUID(&wfe->SubFormat, &KSDATAFORMAT_SUBTYPE_PCM)) {
-            DWORD valid = wfe->Samples.wValidBitsPerSample;
-            if (!valid)
-                valid = fmt->wBitsPerSample;
-            if (!valid || valid > fmt->wBitsPerSample)
-                break;
-            switch (fmt->wBitsPerSample) {
-                case 8:
-                    if (valid == 8)
-                        This->ss.format = PA_SAMPLE_U8;
-                    break;
-                case 16:
-                    if (valid == 16)
-                        This->ss.format = PA_SAMPLE_S16LE;
-                    break;
-                case 24:
-                    if (valid == 24)
-                        This->ss.format = PA_SAMPLE_S24LE;
-                    break;
-                case 32:
-                    if (valid == 24)
-                        This->ss.format = PA_SAMPLE_S24_32LE;
-                    else if (valid == 32)
-                        This->ss.format = PA_SAMPLE_S32LE;
-                default:
-                    break;
-            }
-        }
-        This->map.channels = fmt->nChannels;
-        if (!mask)
-            mask = get_channel_mask(fmt->nChannels);
-        for (j = 0; j < sizeof(pulse_map)/sizeof(*pulse_map) && i < fmt->nChannels; ++j) {
-            if (mask & (1 << j))
-                This->map.map[i++] = pulse_map[j];
-        }
 
-        /* Special case for mono since pulse appears to map it differently */
-        if (mask == SPEAKER_FRONT_CENTER)
-            This->map.map[0] = PA_CHANNEL_POSITION_MONO;
-
-        if ((mask & SPEAKER_ALL) && i < fmt->nChannels) {
-            This->map.map[i++] = PA_CHANNEL_POSITION_MONO;
-            FIXME("Is the 'all' channel mapped correctly?\n");
-        }
-
-        if ((mask & SPEAKER_ALL) && i < fmt->nChannels) {
-            This->map.map[i++] = PA_CHANNEL_POSITION_MONO;
-            FIXME("Is the 'all' channel mapped correctly?\n");
-        }
-
-        if (i < fmt->nChannels || (mask & SPEAKER_RESERVED)) {
-            This->map.channels = 0;
-            ERR("Invalid channel mask: %i/%i and %x\n", i, fmt->nChannels, mask);
-            break;
-        }
-        break;
-        }
-        default: FIXME("Unhandled tag %x\n", fmt->wFormatTag);
-    }
-    This->ss.channels = This->map.channels;
-    hr = AUDCLNT_E_UNSUPPORTED_FORMAT;
-    if (!pa_channel_map_valid(&This->map) || This->ss.format == PA_SAMPLE_INVALID) {
-        ERR("Invalid format! Channel spec valid: %i, format: %i\n", pa_channel_map_valid(&This->map), This->ss.format);
-        dump_fmt(fmt);
+    hr = pulse_spec_from_waveformat(This, fmt);
+    if (FAILED(hr))
         goto exit;
+
+    if (mode == AUDCLNT_SHAREMODE_SHARED) {
+        period = pulse_def_period[This->dataflow == eCapture];
+        if (duration < 2 * period)
+            duration = 2 * period;
     }
+    period_bytes = pa_frame_size(&This->ss) * MulDiv(period, This->ss.rate, 10000000);
 
-    if (mode == AUDCLNT_SHAREMODE_SHARED)
-        period = pulse_def_period;
-    period_bytes = pa_usec_to_bytes(period / 10, &This->ss);
-
-    if (duration < 10000)
-        This->bufsize_frames = fmt->nSamplesPerSec/1000;
-    else if (duration < 20000000)
+    if (duration < 20000000)
         This->bufsize_frames = ceil((duration / 10000000.) * fmt->nSamplesPerSec);
     else
         This->bufsize_frames = 2 * fmt->nSamplesPerSec;
@@ -1079,31 +1176,15 @@ static HRESULT WINAPI AudioClient_Initialize(IAudioClient *iface,
     hr = pulse_stream_connect(This, period_bytes);
     if (SUCCEEDED(hr)) {
         UINT32 unalign;
-        int success;
-        pa_buffer_attr attr = *pa_stream_get_buffer_attr(This->stream);
+        const pa_buffer_attr *attr = pa_stream_get_buffer_attr(This->stream);
         /* Update frames according to new size */
-        dump_attr(&attr);
-        if (This->dataflow == eRender) {
-            This->bufsize_bytes = attr.tlength;
-            period_bytes = attr.minreq;
-        } else {
-            This->capture_period = period_bytes = attr.fragsize;
-            if (This->bufsize_bytes < attr.fragsize * 2)
-                /*  Force new buffer size to be set by making it unaligned */
-                This->bufsize_bytes = attr.fragsize * 2-1;
-        }
-        unalign = This->bufsize_bytes % period_bytes;
-        if (unalign) {
-            pa_operation *o;
-            attr.maxlength = attr.tlength = This->bufsize_bytes - unalign + period_bytes;
-            o = pa_stream_set_buffer_attr(This->stream, &attr, pulse_op_cb, &success);
-            if (o) {
-                while(pa_operation_get_state(o) == PA_OPERATION_RUNNING)
-                    pthread_cond_wait(&pulse_cond, &pulse_lock);
-                pa_operation_unref(o);
-                if (success)
-                    This->bufsize_bytes = attr.maxlength;
-            }
+        dump_attr(attr);
+        if (This->dataflow == eRender)
+            This->bufsize_bytes = attr->tlength;
+        else {
+            This->capture_period = period_bytes = attr->fragsize;
+            if ((unalign = This->bufsize_bytes % period_bytes))
+                This->bufsize_bytes += period_bytes - unalign;
         }
         This->bufsize_frames = This->bufsize_bytes / pa_frame_size(&This->ss);
     }
@@ -1121,7 +1202,6 @@ static HRESULT WINAPI AudioClient_Initialize(IAudioClient *iface,
             for (i = 0; i < capture_packets; ++i, ++cur_packet) {
                 list_add_tail(&This->packet_free_head, &cur_packet->entry);
                 cur_packet->data = data;
-                cur_packet->filled = 0;
                 data += This->capture_period;
             }
             assert(!This->capture_period || This->bufsize_bytes == This->capture_period * capture_packets);
@@ -1240,7 +1320,7 @@ static HRESULT WINAPI AudioClient_GetCurrentPadding(IAudioClient *iface,
         ACImpl_GetCapturePad(This, out);
     pthread_mutex_unlock(&pulse_lock);
 
-    TRACE("%p Pad: %u ms (%u)\n", This, (unsigned)pa_bytes_to_usec(*out * pa_frame_size(&This->ss) / 1000, &This->ss), *out);
+    TRACE("%p Pad: %u ms (%u)\n", This, MulDiv(*out, 1000, This->ss.rate), *out);
     return S_OK;
 }
 
@@ -1274,7 +1354,7 @@ static HRESULT WINAPI AudioClient_IsFormatSupported(IAudioClient *iface,
         hr = E_OUTOFMEMORY;
 
     if (hr == S_OK || !out) {
-        HeapFree(GetProcessHeap(), 0, closest);
+        CoTaskMemFree(closest);
         if (out)
             *out = NULL;
     } else if (closest) {
@@ -1293,58 +1373,18 @@ static HRESULT WINAPI AudioClient_GetMixFormat(IAudioClient *iface,
         WAVEFORMATEX **pwfx)
 {
     ACImpl *This = impl_from_IAudioClient(iface);
-    WAVEFORMATEXTENSIBLE *fmt;
-    HRESULT hr = S_OK;
-    int i;
+    WAVEFORMATEXTENSIBLE *fmt = &pulse_fmt[This->dataflow == eCapture];
 
     TRACE("(%p)->(%p)\n", This, pwfx);
 
     if (!pwfx)
         return E_POINTER;
 
-    *pwfx = CoTaskMemAlloc(sizeof(WAVEFORMATEXTENSIBLE));
+    *pwfx = clone_format(&fmt->Format);
     if (!*pwfx)
         return E_OUTOFMEMORY;
-
-    fmt = (WAVEFORMATEXTENSIBLE*)*pwfx;
-
-    (*pwfx)->wFormatTag = WAVE_FORMAT_EXTENSIBLE;
-    (*pwfx)->cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
-    (*pwfx)->nChannels = pulse_mix_ss.channels;
-    (*pwfx)->wBitsPerSample = 8 * pa_sample_size_of_format(pulse_mix_ss.format);
-    (*pwfx)->nSamplesPerSec = pulse_mix_ss.rate;
-    (*pwfx)->nBlockAlign = (*pwfx)->nChannels * (*pwfx)->wBitsPerSample / 8;
-    (*pwfx)->nAvgBytesPerSec = (*pwfx)->nSamplesPerSec * (*pwfx)->nBlockAlign;
-    if (pulse_mix_ss.format != PA_SAMPLE_S24_32LE)
-        fmt->Samples.wValidBitsPerSample = (*pwfx)->wBitsPerSample;
-    else
-        fmt->Samples.wValidBitsPerSample = 24;
-    if (pulse_mix_ss.format == PA_SAMPLE_FLOAT32LE)
-        fmt->SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
-    else
-        fmt->SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
-
-    fmt->dwChannelMask = 0;
-    for (i = 0; i < pulse_mix_map.channels; ++i)
-        switch (pulse_mix_map.map[i]) {
-            default: FIXME("Unhandled channel %s\n", pa_channel_position_to_string(pulse_mix_map.map[i])); break;
-            case PA_CHANNEL_POSITION_FRONT_LEFT: fmt->dwChannelMask |= SPEAKER_FRONT_LEFT; break;
-            case PA_CHANNEL_POSITION_FRONT_RIGHT: fmt->dwChannelMask |= SPEAKER_FRONT_RIGHT; break;
-            case PA_CHANNEL_POSITION_MONO:
-            case PA_CHANNEL_POSITION_FRONT_CENTER: fmt->dwChannelMask |= SPEAKER_FRONT_CENTER; break;
-            case PA_CHANNEL_POSITION_REAR_LEFT: fmt->dwChannelMask |= SPEAKER_BACK_LEFT; break;
-            case PA_CHANNEL_POSITION_REAR_RIGHT: fmt->dwChannelMask |= SPEAKER_BACK_RIGHT; break;
-            case PA_CHANNEL_POSITION_SUBWOOFER: fmt->dwChannelMask |= SPEAKER_LOW_FREQUENCY; break;
-            case PA_CHANNEL_POSITION_SIDE_LEFT: fmt->dwChannelMask |= SPEAKER_SIDE_LEFT; break;
-            case PA_CHANNEL_POSITION_SIDE_RIGHT: fmt->dwChannelMask |= SPEAKER_SIDE_RIGHT; break;
-        }
-    dump_fmt((WAVEFORMATEX*)fmt);
-    if (FAILED(hr)) {
-        CoTaskMemFree(*pwfx);
-        *pwfx = NULL;
-    }
-
-    return hr;
+    dump_fmt(*pwfx);
+    return S_OK;
 }
 
 static HRESULT WINAPI AudioClient_GetDevicePeriod(IAudioClient *iface,
@@ -1358,9 +1398,9 @@ static HRESULT WINAPI AudioClient_GetDevicePeriod(IAudioClient *iface,
         return E_POINTER;
 
     if (defperiod)
-        *defperiod = pulse_def_period;
+        *defperiod = pulse_def_period[This->dataflow == eCapture];
     if (minperiod)
-        *minperiod = pulse_min_period;
+        *minperiod = pulse_min_period[This->dataflow == eCapture];
 
     return S_OK;
 }
@@ -1392,15 +1432,17 @@ static HRESULT WINAPI AudioClient_Start(IAudioClient *iface)
     }
     This->clock_pulse = PA_USEC_INVALID;
 
-    o = pa_stream_cork(This->stream, 0, pulse_op_cb, &success);
-    if (o) {
-        while(pa_operation_get_state(o) == PA_OPERATION_RUNNING)
-            pthread_cond_wait(&pulse_cond, &pulse_lock);
-        pa_operation_unref(o);
-    } else
-        success = 0;
-    if (!success)
-        hr = E_FAIL;
+    if (pa_stream_is_corked(This->stream)) {
+        o = pa_stream_cork(This->stream, 0, pulse_op_cb, &success);
+        if (o) {
+            while(pa_operation_get_state(o) == PA_OPERATION_RUNNING)
+                pthread_cond_wait(&pulse_cond, &pulse_lock);
+            pa_operation_unref(o);
+        } else
+            success = 0;
+        if (!success)
+            hr = E_FAIL;
+    }
     if (SUCCEEDED(hr)) {
         This->started = TRUE;
         if (This->dataflow == eRender && This->event)
@@ -1431,15 +1473,17 @@ static HRESULT WINAPI AudioClient_Stop(IAudioClient *iface)
         return S_FALSE;
     }
 
-    o = pa_stream_cork(This->stream, 1, pulse_op_cb, &success);
-    if (o) {
-        while(pa_operation_get_state(o) == PA_OPERATION_RUNNING)
-            pthread_cond_wait(&pulse_cond, &pulse_lock);
-        pa_operation_unref(o);
-    } else
-        success = 0;
-    if (!success)
-        hr = E_FAIL;
+    if (This->dataflow == eRender) {
+        o = pa_stream_cork(This->stream, 1, pulse_op_cb, &success);
+        if (o) {
+            while(pa_operation_get_state(o) == PA_OPERATION_RUNNING)
+                pthread_cond_wait(&pulse_cond, &pulse_lock);
+            pa_operation_unref(o);
+        } else
+            success = 0;
+        if (!success)
+            hr = E_FAIL;
+    }
     if (SUCCEEDED(hr)) {
         This->started = FALSE;
         This->clock_pulse = PA_USEC_INVALID;
@@ -1451,8 +1495,6 @@ static HRESULT WINAPI AudioClient_Stop(IAudioClient *iface)
 static HRESULT WINAPI AudioClient_Reset(IAudioClient *iface)
 {
     ACImpl *This = impl_from_IAudioClient(iface);
-    pa_operation *o;
-    int success;
     HRESULT hr = S_OK;
 
     TRACE("(%p)\n", This);
@@ -1474,28 +1516,30 @@ static HRESULT WINAPI AudioClient_Reset(IAudioClient *iface)
         return AUDCLNT_E_BUFFER_OPERATION_PENDING;
     }
 
-    if (This->dataflow == eRender)
-        This->clock_lastpos = This->clock_written = 0;
-    else
+    if (This->dataflow == eRender) {
+        /* If there is still data in the render buffer it needs to be removed from the server */
+        int success = 0;
+        if (This->pad) {
+            pa_operation *o = pa_stream_flush(This->stream, pulse_op_cb, &success);
+            if (o) {
+                while(pa_operation_get_state(o) == PA_OPERATION_RUNNING)
+                    pthread_cond_wait(&pulse_cond, &pulse_lock);
+                pa_operation_unref(o);
+            }
+        }
+        if (success || !This->pad)
+            This->clock_lastpos = This->clock_written = This->pad = 0;
+    } else {
+        ACPacket *p;
         This->clock_written += This->pad;
-    o = pa_stream_flush(This->stream, pulse_op_cb, &success);
-    if (o) {
-        while(pa_operation_get_state(o) == PA_OPERATION_RUNNING)
-            pthread_cond_wait(&pulse_cond, &pulse_lock);
-        pa_operation_unref(o);
-    } else
-        success = 0;
-    This->pad = 0;
-    if (!success)
-        hr = S_FALSE;
-    while (!list_empty(&This->packet_filled_head)) {
-        ACPacket *p = (ACPacket*)list_head(&This->packet_filled_head);
-        p->filled = 0;
-        list_remove(&p->entry);
-        list_add_tail(&This->packet_free_head, &p->entry);
+        This->pad = 0;
+
+        if ((p = This->locked_ptr)) {
+            This->locked_ptr = NULL;
+            list_add_tail(&This->packet_free_head, &p->entry);
+        }
+        list_move_tail(&This->packet_free_head, &This->packet_filled_head);
     }
-    if (!list_empty(&This->packet_free_head))
-        ((ACPacket*)list_head(&This->packet_free_head))->filled = 0;
     pthread_mutex_unlock(&pulse_lock);
 
     return hr;
@@ -1789,13 +1833,13 @@ static HRESULT WINAPI AudioCaptureClient_GetBuffer(IAudioCaptureClient *iface,
 
     ACImpl_GetCapturePad(This, NULL);
     if ((packet = This->locked_ptr)) {
-        *frames = packet->filled / pa_frame_size(&This->ss);
+        *frames = This->capture_period / pa_frame_size(&This->ss);
         *flags = 0;
         if (packet->discont)
             *flags |= AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY;
         if (devpos) {
             if (packet->discont)
-                *devpos = (This->clock_written + packet->filled) / pa_frame_size(&This->ss);
+                *devpos = (This->clock_written + This->capture_period) / pa_frame_size(&This->ss);
             else
                 *devpos = This->clock_written / pa_frame_size(&This->ss);
         }
@@ -1829,12 +1873,11 @@ static HRESULT WINAPI AudioCaptureClient_ReleaseBuffer(
     if (done) {
         ACPacket *packet = This->locked_ptr;
         This->locked_ptr = NULL;
-        This->pad -= packet->filled;
+        This->pad -= This->capture_period;
         if (packet->discont)
-            This->clock_written += 2 * packet->filled;
+            This->clock_written += 2 * This->capture_period;
         else
-            This->clock_written += packet->filled;
-        packet->filled = 0;
+            This->clock_written += This->capture_period;
         list_add_tail(&This->packet_free_head, &packet->entry);
     }
     This->locked = 0;
@@ -1856,7 +1899,7 @@ static HRESULT WINAPI AudioCaptureClient_GetNextPacketSize(
     ACImpl_GetCapturePad(This, NULL);
     p = This->locked_ptr;
     if (p)
-        *frames = p->filled / pa_frame_size(&This->ss);
+        *frames = This->capture_period / pa_frame_size(&This->ss);
     else
         *frames = 0;
     pthread_mutex_unlock(&pulse_lock);
@@ -1912,11 +1955,16 @@ static ULONG WINAPI AudioClock_Release(IAudioClock *iface)
 static HRESULT WINAPI AudioClock_GetFrequency(IAudioClock *iface, UINT64 *freq)
 {
     ACImpl *This = impl_from_IAudioClock(iface);
+    HRESULT hr;
 
     TRACE("(%p)->(%p)\n", This, freq);
 
-    *freq = This->ss.rate * pa_frame_size(&This->ss);
-    return S_OK;
+    pthread_mutex_lock(&pulse_lock);
+    hr = pulse_stream_valid(This);
+    if (SUCCEEDED(hr))
+        *freq = This->ss.rate * pa_frame_size(&This->ss);
+    pthread_mutex_unlock(&pulse_lock);
+    return hr;
 }
 
 static HRESULT WINAPI AudioClock_GetPosition(IAudioClock *iface, UINT64 *pos,
@@ -1924,6 +1972,7 @@ static HRESULT WINAPI AudioClock_GetPosition(IAudioClock *iface, UINT64 *pos,
 {
     ACImpl *This = impl_from_IAudioClock(iface);
     pa_usec_t time;
+    HRESULT hr;
 
     TRACE("(%p)->(%p, %p)\n", This, pos, qpctime);
 
@@ -1931,6 +1980,12 @@ static HRESULT WINAPI AudioClock_GetPosition(IAudioClock *iface, UINT64 *pos,
         return E_POINTER;
 
     pthread_mutex_lock(&pulse_lock);
+    hr = pulse_stream_valid(This);
+    if (FAILED(hr)) {
+        pthread_mutex_unlock(&pulse_lock);
+        return hr;
+    }
+
     *pos = This->clock_written;
     if (This->clock_pulse != PA_USEC_INVALID && pa_stream_get_time(This->stream, &time) >= 0) {
         UINT32 delta = pa_usec_to_bytes(time - This->clock_pulse, &This->ss);
@@ -2714,7 +2769,7 @@ static HRESULT WINAPI SimpleAudioVolume_SetMasterVolume(
     if (context)
         FIXME("Notifications not supported yet\n");
 
-    TRACE("ALSA does not support volume control\n");
+    TRACE("Pulseaudio does not support session volume control\n");
 
     pthread_mutex_lock(&pulse_lock);
     session->master_vol = level;
@@ -2851,7 +2906,7 @@ static HRESULT WINAPI ChannelAudioVolume_SetChannelVolume(
     if (context)
         FIXME("Notifications not supported yet\n");
 
-    TRACE("ALSA does not support volume control\n");
+    TRACE("Pulseaudio does not support session volume control\n");
 
     pthread_mutex_lock(&pulse_lock);
     session->channel_vols[index] = level;
@@ -2899,7 +2954,7 @@ static HRESULT WINAPI ChannelAudioVolume_SetAllVolumes(
     if (context)
         FIXME("Notifications not supported yet\n");
 
-    TRACE("ALSA does not support volume control\n");
+    TRACE("Pulseaudio does not support session volume control\n");
 
     pthread_mutex_lock(&pulse_lock);
     for(i = 0; i < count; ++i)
