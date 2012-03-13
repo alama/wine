@@ -574,9 +574,11 @@ static void pulse_rd_loop(ACImpl *This, size_t bytes)
         UINT32 src_len, copy, rem = This->capture_period;
         if (!(p = (ACPacket*)list_head(&This->packet_free_head))) {
             p = (ACPacket*)list_head(&This->packet_filled_head);
-
-            next = (ACPacket*)p->entry.next;
-            next->discont = 1;
+            if (!p->discont) {
+                next = (ACPacket*)p->entry.next;
+                next->discont = 1;
+            } else
+                p = (ACPacket*)list_tail(&This->packet_filled_head);
             assert(This->pad == This->bufsize_bytes);
         } else {
             assert(This->pad < This->bufsize_bytes);
