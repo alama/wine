@@ -869,6 +869,7 @@ ULONG CDECL wined3d_device_decref(struct wined3d_device *device)
             {
                 FIXME("Leftover resource %p with type %s (%#x).\n",
                         resource, debug_d3dresourcetype(resource->type), resource->type);
+                resource->device = NULL;
             }
         }
 
