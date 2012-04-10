@@ -81,6 +81,11 @@ const WCHAR pulse_keyW[] = {'S','o','f','t','w','a','r','e','\\',
     'W','i','n','e','\\','P','u','l','s','e',0};
 const WCHAR pulse_streamW[] = { 'S','t','r','e','a','m','V','o','l',0 };
 
+static GUID pulse_render_guid = 
+{ 0xfd47d9cc, 0x4218, 0x4135, { 0x9c, 0xe2, 0x0c, 0x19, 0x5c, 0x87, 0x40, 0x5b } };
+static GUID pulse_capture_guid =
+{ 0x25da76d0, 0x033c, 0x4235, { 0x90, 0x02, 0x19, 0xf4, 0x88, 0x94, 0xac, 0x6f } };
+
 BOOL WINAPI DllMain(HINSTANCE dll, DWORD reason, void *reserved)
 {
     if (reason == DLL_PROCESS_ATTACH) {
@@ -723,7 +728,7 @@ static HRESULT pulse_stream_connect(ACImpl *This, UINT32 period_bytes) {
     return S_OK;
 }
 
-HRESULT WINAPI AUDDRV_GetEndpointIDs(EDataFlow flow, WCHAR ***ids, void ***keys,
+HRESULT WINAPI AUDDRV_GetEndpointIDs(EDataFlow flow, const WCHAR ***ids, GUID **keys,
         UINT *num, UINT *def_index)
 {
     HRESULT hr = S_OK;
@@ -737,20 +742,21 @@ HRESULT WINAPI AUDDRV_GetEndpointIDs(EDataFlow flow, WCHAR ***ids, void ***keys,
     *num = 1;
     *def_index = 0;
 
-    *ids = HeapAlloc(GetProcessHeap(), 0, sizeof(WCHAR *));
+    *ids = HeapAlloc(GetProcessHeap(), 0, sizeof(**ids));
     if (!*ids)
         return E_OUTOFMEMORY;
+    (*ids)[0] = defaultW;
 
-    (*ids)[0] = HeapAlloc(GetProcessHeap(), 0, sizeof(defaultW));
-    if (!(*ids)[0]) {
+    *keys = HeapAlloc(GetProcessHeap(), 0, sizeof(**keys));
+    if (!*keys) {
         HeapFree(GetProcessHeap(), 0, *ids);
+        *ids = NULL;
         return E_OUTOFMEMORY;
     }
-
-    lstrcpyW((*ids)[0], defaultW);
-
-    *keys = HeapAlloc(GetProcessHeap(), 0, sizeof(void *));
-    (*keys)[0] = NULL;
+    if (flow == eRender)
+        (*keys)[0] = pulse_render_guid;
+    else
+        (*keys)[0] = pulse_capture_guid;
 
     return S_OK;
 }
@@ -764,15 +770,19 @@ int WINAPI AUDDRV_GetPriority(void)
     return SUCCEEDED(hr) ? 3 : 0;
 }
 
-HRESULT WINAPI AUDDRV_GetAudioEndpoint(void *key, IMMDevice *dev,
-        EDataFlow dataflow, IAudioClient **out)
+HRESULT WINAPI AUDDRV_GetAudioEndpoint(GUID *guid, IMMDevice *dev, IAudioClient **out)
 {
     HRESULT hr;
     ACImpl *This;
     int i;
+    EDataFlow dataflow;
 
-    TRACE("%p %p %d %p\n", key, dev, dataflow, out);
-    if (dataflow != eRender && dataflow != eCapture)
+    TRACE("%s %p %p\n", debugstr_guid(guid), dev, out);
+    if (IsEqualGUID(guid, &pulse_render_guid))
+        dataflow = eRender;
+    else if (IsEqualGUID(guid, &pulse_capture_guid))
+        dataflow = eCapture;
+    else
         return E_UNEXPECTED;
 
     *out = NULL;
